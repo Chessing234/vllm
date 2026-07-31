@@ -1939,7 +1939,7 @@ def test_register_kv_caches(
             ]
             expected_block_len = tensor0.stride(0) * tensor0.element_size()
             expected_blocks_count = num_blocks * len(expected_base_addrs)
-        elif layout in ("LBHNC", "LBNHC", "BLHNC"):
+        elif layout in ("LBHNC", "LBNHC"):
             expected_base_addrs = [
                 tensor0.data_ptr(),
                 tensor1.data_ptr(),
@@ -1948,6 +1948,8 @@ def test_register_kv_caches(
             expected_block_len = kv_cache_spec.page_size_bytes
             expected_blocks_count = kv_cache_config.num_blocks * 3
         else:
+            # Block-major storages register whole per-block windows (one
+            # region per storage): the layers' views alias the same window.
             expected_base_addrs = [raw0.data_ptr(), raw1.data_ptr()]
             expected_block_len = {
                 raw0.nbytes // num_blocks,
