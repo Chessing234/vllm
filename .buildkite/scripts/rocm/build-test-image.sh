@@ -31,52 +31,43 @@ normalize_repo_slug() {
     repo="${repo#ssh://git@github.com/}"
     repo="${repo#https://github.com/}"
     repo="${repo#http://github.com/}"
+    repo="${repo#github.com/}"
     printf '%s\n' "${repo}"
 }
 
 is_trusted_main_build() {
+    local stable_branch="${ROCM_BASE_STABLE_BRANCH:-${CI_BASE_STABLE_BRANCH:-main}}"
+    local stable_repo="${ROCM_BASE_STABLE_REPO_SLUG:-${CI_BASE_STABLE_REPO_SLUG:-vllm-project/vllm}}"
+
     [[ "${BUILDKITE:-false}" == "true" ]] \
         && [[ "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]] \
-        && [[ "${BUILDKITE_BRANCH:-}" == "${ROCM_BASE_STABLE_BRANCH:-main}" ]] \
+        && [[ "${BUILDKITE_BRANCH:-}" == "${stable_branch}" ]] \
         && [[ "$(normalize_repo_slug "${BUILDKITE_REPO:-}")" == \
-            "$(normalize_repo_slug \
-                "${ROCM_BASE_STABLE_REPO_SLUG:-vllm-project/vllm}")" ]]
+            "$(normalize_repo_slug "${stable_repo}")" ]]
 }
 
 is_digest_pinned_image() {
     [[ "${1:-}" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]
 }
 
-use_ci_base_if_present() {
-    local ci_base_image=""
+load_digest_handoff() {
+    local metadata_key="$1"
+    local env_name="$2"
+    local description="$3"
+    local image_ref=""
 
-    ci_base_image="$(metadata_get rocm-ci-base-image)"
-    if [[ -z "${ci_base_image}" ]]; then
+    image_ref="$(metadata_get "${metadata_key}")"
+    if [[ -z "${image_ref}" ]]; then
         return 1
     fi
-    if ! is_digest_pinned_image "${ci_base_image}"; then
-        echo "ROCm ci_base handoff is not digest-pinned: ${ci_base_image}" >&2
-        return 1
-    fi
-
-    export CI_BASE_IMAGE="${ci_base_image}"
-    echo "Using ROCm ci_base image selected by the preceding build step: ${CI_BASE_IMAGE}"
-}
-
-use_ci_base_parent_if_present() {
-    local parent_image=""
-
-    parent_image="$(metadata_get rocm-ci-base-parent-image)"
-    if [[ -z "${parent_image}" ]]; then
-        return 1
-    fi
-    if ! is_digest_pinned_image "${parent_image}"; then
-        echo "ROCm ci_base parent handoff is not digest-pinned: ${parent_image}" >&2
+    if ! is_digest_pinned_image "${image_ref}"; then
+        echo "${description} is not digest-pinned: ${image_ref}" >&2
         return 1
     fi
 
-    export BASE_IMAGE="${parent_image}"
-    echo "Using the exact parent selected for ci_base: ${BASE_IMAGE}"
+    printf -v "${env_name}" '%s' "${image_ref}"
+    export "${env_name?}"
+    echo "Using ${description}: ${image_ref}"
 }
 
 validate_selected_base() {
@@ -108,7 +99,8 @@ main() {
     export REMOTE_VLLM=0
     unset VLLM_BRANCH
 
-    if ! use_ci_base_if_present; then
+    if ! load_digest_handoff \
+        rocm-ci-base-image CI_BASE_IMAGE "ROCm ci_base handoff"; then
         if [[ "${BUILDKITE:-false}" == "true" ]]; then
             echo "Required ROCm ci_base handoff metadata is missing or invalid" >&2
             return 1
@@ -116,7 +108,8 @@ main() {
         echo "No ROCm ci_base handoff metadata found; using the local default"
     fi
 
-    if ! use_ci_base_parent_if_present; then
+    if ! load_digest_handoff rocm-ci-base-parent-image BASE_IMAGE \
+        "ROCm ci_base parent handoff"; then
         if [[ "${BUILDKITE:-false}" == "true" ]]; then
             echo "Required ROCm ci_base parent handoff metadata is missing or invalid" >&2
             return 1

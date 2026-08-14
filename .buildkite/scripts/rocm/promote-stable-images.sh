@@ -15,17 +15,19 @@ normalize_repo() {
     repo="${repo#ssh://git@github.com/}"
     repo="${repo#https://github.com/}"
     repo="${repo#http://github.com/}"
+    repo="${repo#github.com/}"
     printf '%s\n' "${repo}"
 }
 
 is_trusted_main() {
+    local stable_branch="${ROCM_BASE_STABLE_BRANCH:-${CI_BASE_STABLE_BRANCH:-${STABLE_BRANCH}}}"
+    local stable_repo="${ROCM_BASE_STABLE_REPO_SLUG:-${CI_BASE_STABLE_REPO_SLUG:-${TRUSTED_REPO}}}"
+
     [[ "${BUILDKITE:-false}" == true \
         && "${BUILDKITE_PULL_REQUEST:-false}" == false \
-        && "${BUILDKITE_BRANCH:-}" == \
-            "${ROCM_BASE_STABLE_BRANCH:-${STABLE_BRANCH}}" \
+        && "${BUILDKITE_BRANCH:-}" == "${stable_branch}" \
         && "$(normalize_repo "${BUILDKITE_REPO:-}")" == \
-            "$(normalize_repo \
-                "${ROCM_BASE_STABLE_REPO_SLUG:-${TRUSTED_REPO}}")" ]]
+            "$(normalize_repo "${stable_repo}")" ]]
 }
 
 metadata_required() {
@@ -176,22 +178,38 @@ validate_candidates() {
 }
 
 validate_smoke() {
-    local required="$1" ref="$2" smoked="$3" smoked_ref="$4"
+    local required="$1" ref="$2" smoked="$3" smoked_ref="$4" ci="$5"
     local expected="${ROCM_CI_IMAGE_REPO:-rocm/vllm-ci}:build-${BUILDKITE_BUILD_ID}"
-    local revision="" status=0
+    local expected_digest="" smoke_values="" revision="" smoke_ci="" status=0
+    local expected_repo="" smoked_repo=""
 
     if [[ "${required}" != 1 || "${smoked}" != 1 \
-        || "${ref}" != "${expected}" || "${smoked_ref}" != "${expected}" ]]; then
+        || "${ref}" != "${expected}" ]]; then
         echo "Promotion requires the successful build-scoped smoke test" >&2
         return 1
     fi
-    lookup_digest "${ref}" >/dev/null || status=$?
+    if ! is_pinned "${smoked_ref}" \
+        || ! expected_repo=$(repository_of "${expected}") \
+        || ! smoked_repo=$(repository_of "${smoked_ref}") \
+        || [[ "${smoked_repo}" != "${expected_repo}" ]]; then
+        echo "Promotion requires the successful build-scoped smoke test" >&2
+        return 1
+    fi
+    expected_digest=$(lookup_digest "${ref}") || status=$?
     ((status == 0)) || return 1
-    revision=$(inspect_labels "${ref}" \
-        '{{ index .Image.Config.Labels "org.opencontainers.image.revision" }}') \
+    if [[ "${smoked_ref##*@}" != "${expected_digest}" ]]; then
+        echo "Build-scoped smoke image changed after validation" >&2
+        return 1
+    fi
+    smoke_values=$(inspect_labels "${smoked_ref}" \
+        '{{ index .Image.Config.Labels "org.opencontainers.image.revision" }}|{{ index .Image.Config.Labels "vllm.rocm.ci_base_image" }}') \
         || return 1
-    [[ "${revision,,}" == "${BUILDKITE_COMMIT,,}" ]] \
-        || { echo "Smoked image revision does not match this build" >&2; return 1; }
+    IFS='|' read -r revision smoke_ci <<< "${smoke_values}"
+    if [[ "${revision,,}" != "${BUILDKITE_COMMIT,,}" \
+        || "${smoke_ci}" != "${ci}" ]]; then
+        echo "Smoked image revision or ci_base parent does not match this build" >&2
+        return 1
+    fi
 }
 
 validate_checked_in_parent() {
@@ -222,7 +240,7 @@ validate_checked_in_parent() {
 }
 
 recheck_main() {
-    local branch="${ROCM_BASE_STABLE_BRANCH:-${STABLE_BRANCH}}" tip=""
+    local branch="${ROCM_BASE_STABLE_BRANCH:-${CI_BASE_STABLE_BRANCH:-${STABLE_BRANCH}}}" tip=""
     tip=$(git ls-remote --exit-code "${BUILDKITE_REPO}" \
         "refs/heads/${branch}" 2>/dev/null | awk 'NR == 1 { print $1 }')
     [[ "${tip}" =~ ^[0-9a-fA-F]{40}$ ]] \
@@ -258,14 +276,14 @@ rollback_aliases() {
 
 main() {
     local repo="${ROCM_BASE_IMAGE_REPO:-${IMAGE_REPO}}"
-    local ci_stable="${CI_BASE_IMAGE_TAG:-${repo}:ci_base}"
+    local ci_stable=""
     local ci_version="${CI_BASE_METADATA_VERSION:-3}"
-    local ci_versioned="${CI_BASE_STABLE_CACHE_REF:-${ci_stable}-v${ci_version}}"
+    local ci_versioned=""
     local base="" base_hash="" base_content="" base_stable=""
     local ci="" ci_content="" ci_build="" parent=""
     local required="" smoke_ref="" smoked="" smoked_ref=""
-    local status=0 failed=0 needs_write=0 actual="" i=0
-    local -a aliases=("${repo}:base" "${ci_stable}" "${ci_versioned}")
+    local status=0 failed=0 needs_write=0 bootstrap_v3=0 actual="" source="" i=0
+    local -a aliases=()
     local -a previous=("" "" "") candidates=()
 
     is_trusted_main \
@@ -283,18 +301,31 @@ main() {
     ci=$(metadata_required rocm-ci-base-image)
     ci_content=$(metadata_required rocm-ci-base-image-content)
     ci_build=$(metadata_required rocm-ci-base-image-build)
+    ci_stable=$(metadata_required rocm-ci-base-image-stable)
     parent=$(metadata_required rocm-ci-base-parent-image)
     required=$(metadata_required rocm-ci-image-smoke-required)
     smoke_ref=$(metadata_required rocm-ci-image-smoke-ref)
     smoked=$(metadata_required rocm-ci-image-smoked)
     smoked_ref=$(metadata_required rocm-ci-image-smoked-ref)
+    ci_versioned="${ci_stable}-v${ci_version}"
+    if [[ -n "${CI_BASE_STABLE_CACHE_REF:-}" \
+        && "${CI_BASE_STABLE_CACHE_REF}" != "${ci_versioned}" ]]; then
+        echo "Configured ci_base stable cache ref does not match ${ci_versioned}" >&2
+        return 1
+    fi
+    if [[ "$(repository_of "${ci_stable}")" != "${repo}" ]]; then
+        echo "Stable base and ci_base aliases must share the configured repository" >&2
+        return 1
+    fi
+    aliases=("${repo}:base" "${ci_stable}" "${ci_versioned}")
     candidates=("${base}" "${ci}" "${ci}")
 
     validate_candidates \
         "${base}" "${ci}" "${parent}" "${repo}" "${ci_stable}" \
         "${base_hash}" "${base_content}" "${base_stable}" \
         "${ci_content}" "${ci_build}"
-    validate_smoke "${required}" "${smoke_ref}" "${smoked}" "${smoked_ref}"
+    validate_smoke \
+        "${required}" "${smoke_ref}" "${smoked}" "${smoked_ref}" "${ci}"
     validate_checked_in_parent "${base}"
 
     for i in "${!aliases[@]}"; do
@@ -302,19 +333,37 @@ main() {
         previous[i]=$(lookup_digest "${aliases[i]}") || status=$?
         case "${status}" in
             0) [[ "${previous[i]}" == "${candidates[i]##*@}" ]] || needs_write=1 ;;
-            1) previous[i]=""; needs_write=1 ;;
+            1)
+                if ((i < 2)); then
+                    echo "Cannot safely promote without an existing rollback value for ${aliases[i]}" >&2
+                    return 1
+                fi
+                previous[i]=""
+                bootstrap_v3=1
+                needs_write=1
+                ;;
             *) echo "Could not snapshot ${aliases[i]}" >&2; return 1 ;;
         esac
     done
     ((needs_write == 1)) \
         || { echo "Stable ROCm aliases already match the candidates"; return 0; }
-    # v3 is initially absent; use the legacy ci_base value as its rollback
-    # point so a first-time partial promotion still restores one generation.
-    [[ -n "${previous[2]}" ]] || previous[2]="${previous[1]}"
-
     status=0
     recheck_main || status=$?
     case "${status}" in 0) ;; 2) return 0 ;; *) return 1 ;; esac
+
+    if ((bootstrap_v3 == 1)); then
+        # Bootstrap the trusted-only discovery alias to the current legacy
+        # stable generation before promotion. From this point every alias has
+        # an exact rollback value even if a later write or verification fails.
+        source="$(repository_of "${aliases[2]}")@${previous[1]}"
+        if ! docker buildx imagetools create --prefer-index=false \
+            -t "${aliases[2]}" "${source}" \
+            || [[ "$(lookup_digest "${aliases[2]}")" != "${previous[1]}" ]]; then
+            echo "Could not bootstrap ${aliases[2]} to the current stable generation" >&2
+            return 1
+        fi
+        previous[2]="${previous[1]}"
+    fi
 
     docker buildx imagetools create --prefer-index=false \
         -t "${aliases[0]}" "${base}" || failed=1

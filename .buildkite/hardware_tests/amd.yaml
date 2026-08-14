@@ -12,6 +12,8 @@ steps:
     no_plugin: true
     commands:
       - bash .buildkite/scripts/rocm/refresh-base-image.sh
+    concurrency: 1
+    concurrency_group: "vllm/rocm/base-build/$BUILDKITE_COMMIT"
     env:
       DOCKER_BUILDKIT: "1"
       BUILDKIT_PROGRESS: "tty"
@@ -19,8 +21,6 @@ steps:
     retry:
       automatic:
         - exit_status: 1  # Transient Docker/BuildKit failure
-          limit: 1
-        - exit_status: 2  # Transient git/registry identity failure
           limit: 1
         - exit_status: -1  # Agent was lost
           limit: 1
@@ -37,6 +37,8 @@ steps:
     no_plugin: true
     commands:
       - bash .buildkite/scripts/rocm/build-ci-base.sh
+    concurrency: 1
+    concurrency_group: "vllm/rocm/ci-base-build/$BUILDKITE_COMMIT"
     env:
       DOCKER_BUILDKIT: "1"
       BUILDKIT_PROGRESS: "tty"
@@ -47,6 +49,8 @@ steps:
     retry:
       automatic:
         - exit_status: 1  # Transient Docker/BuildKit failure
+          limit: 1
+        - exit_status: 2  # Exact image found but registry handoff failed
           limit: 1
         - exit_status: -1  # Agent was lost
           limit: 1

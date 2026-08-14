@@ -17,6 +17,11 @@ is_digest_pinned_image() {
 main() {
     local base_image=""
 
+    # The content identity below describes this checkout. Do not let legacy
+    # external pipeline settings switch the build to a remote source tree.
+    export REMOTE_VLLM=0
+    unset VLLM_BRANCH
+
     base_image="$(metadata_get rocm-base-image)"
     if is_digest_pinned_image "${base_image}"; then
         export BASE_IMAGE="${base_image}"

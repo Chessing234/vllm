@@ -18,8 +18,58 @@ metadata_set() {
     fi
 }
 
+resolve_image_digest() {
+    local image_ref="$1"
+    local attempts="${ROCM_IMAGE_DIGEST_ATTEMPTS:-4}"
+    local delay_secs="${ROCM_IMAGE_DIGEST_RETRY_DELAY:-2}"
+    local output=""
+    local digest=""
+    local status=0
+    local attempt=0
+
+    if [[ "${image_ref}" =~ @(sha256:[0-9a-f]{64})$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    if [[ ! "${attempts}" =~ ^[1-9][0-9]*$ \
+        || ! "${delay_secs}" =~ ^[0-9]+$ ]]; then
+        echo "Invalid ROCm smoke image digest retry configuration" >&2
+        return 1
+    fi
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        status=0
+        output=$(docker buildx imagetools inspect "${image_ref}" 2>&1) || status=$?
+        digest=$(awk '$1 == "Digest:" { print $2; exit }' <<< "${output}")
+        if ((status == 0)) && [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            printf '%s\n' "${digest}"
+            return 0
+        fi
+        ((attempt == attempts)) || sleep "${delay_secs}"
+    done
+    printf 'Failed to resolve smoke image digest for %s (status %d)\n%s\n' \
+        "${image_ref}" "${status}" "${output:-<no output>}" >&2
+    return 1
+}
+
+pin_image_ref() {
+    local image_ref="$1"
+    local digest="$2"
+    local repository="${image_ref%@*}"
+    local last_component="${repository##*/}"
+
+    [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+    if [[ "${last_component}" == *:* ]]; then
+        repository="${repository%:*}"
+    fi
+    [[ -n "${repository}" ]] || return 1
+    printf '%s@%s\n' "${repository}" "${digest}"
+}
+
 main() {
     local image_ref="${VLLM_CI_SMOKE_IMAGE:-}"
+    local image_digest=""
+    local pinned_image=""
+    local post_smoke_digest=""
     local required_ref=""
     local smoke_required=""
 
@@ -48,7 +98,10 @@ main() {
         image_ref="rocm/vllm-ci:${BUILDKITE_COMMIT:?set VLLM_CI_SMOKE_IMAGE or BUILDKITE_COMMIT}"
     fi
 
-    docker run --rm --network=none --entrypoint /bin/bash "${image_ref}" -ec '
+    image_digest=$(resolve_image_digest "${image_ref}") || return 1
+    pinned_image=$(pin_image_ref "${image_ref}" "${image_digest}") || return 1
+
+    docker run --rm --network=none --entrypoint /bin/bash "${pinned_image}" -ec '
   if [ ! -d /vllm-workspace ]; then echo Missing directory: /vllm-workspace >&2; exit 1; fi
   if [ ! -d /vllm-workspace/tests ]; then echo Missing directory: /vllm-workspace/tests >&2; exit 1; fi
   if [ ! -d /vllm-workspace/src/vllm ]; then echo Missing directory: /vllm-workspace/src/vllm >&2; exit 1; fi
@@ -74,7 +127,13 @@ PY
   echo AMD image smoke OK
 '
 
-    metadata_set rocm-ci-image-smoked-ref "${image_ref}"
+    post_smoke_digest=$(resolve_image_digest "${image_ref}") || return 1
+    if [[ "${post_smoke_digest}" != "${image_digest}" ]]; then
+        echo "ROCm smoke image tag changed while the smoke test was running" >&2
+        return 1
+    fi
+
+    metadata_set rocm-ci-image-smoked-ref "${pinned_image}"
     metadata_set rocm-ci-image-smoked 1
 }
 

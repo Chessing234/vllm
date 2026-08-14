@@ -9,11 +9,11 @@ CACHE_REPO="${ROCM_BASE_CACHE_REPO:-${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}}
 BUILDER_NAME="${ROCM_BASE_BUILDER_NAME:-vllm-rocm-base-builder}"
 DEFAULT_ROCM_BASE_METADATA_VERSION="2"
 DEFAULT_ROCM_BASE_CONTENT_FILES="${DOCKERFILE}"
-DEFAULT_ROCM_BASE_CONTENT_ARGS="BASE_IMAGE TRITON_BRANCH TRITON_REPO PYTORCH_BRANCH PYTORCH_REPO PYTORCH_VISION_BRANCH PYTORCH_VISION_REPO PYTORCH_AUDIO_BRANCH PYTORCH_AUDIO_REPO FA_BRANCH FA_REPO AITER_BRANCH AITER_REPO MORI_BRANCH MORI_REPO PYTORCH_ROCM_ARCH PYTHON_VERSION USE_SCCACHE SCCACHE_DOWNLOAD_URL SCCACHE_ENDPOINT SCCACHE_BUCKET_NAME SCCACHE_REGION_NAME SCCACHE_S3_NO_CREDENTIALS"
+DEFAULT_ROCM_BASE_CONTENT_ARGS="BASE_IMAGE TRITON_BRANCH TRITON_REPO PYTORCH_BRANCH PYTORCH_REPO PYTORCH_VISION_BRANCH PYTORCH_VISION_REPO PYTORCH_AUDIO_BRANCH PYTORCH_AUDIO_REPO FA_BRANCH FA_REPO AITER_BRANCH AITER_REPO MORI_BRANCH MORI_REPO PYTORCH_ROCM_ARCH PYTHON_VERSION USE_SCCACHE SCCACHE_DOWNLOAD_URL SCCACHE_BUCKET_NAME SCCACHE_REGION_NAME SCCACHE_S3_NO_CREDENTIALS"
+DEFAULT_ROCM_BASE_BUILD_ARGS="${DEFAULT_ROCM_BASE_CONTENT_ARGS} SCCACHE_ENDPOINT"
 
 ROCM_BASE_LAYER_CACHE_REF=""
 ROCM_BASE_TRUSTED_LAYER_CACHE_REF="${CACHE_REPO}:rocm-base-main"
-ROCM_BASE_STABLE_TAG_UPDATED=0
 declare -a ROCM_BASE_CACHE_ARGS=()
 
 metadata_set() {
@@ -75,14 +75,15 @@ normalize_repo_slug() {
 
 is_trusted_main_build() {
     local actual_repo=""
+    local stable_branch="${ROCM_BASE_STABLE_BRANCH:-${CI_BASE_STABLE_BRANCH:-main}}"
+    local stable_repo="${ROCM_BASE_STABLE_REPO_SLUG:-${CI_BASE_STABLE_REPO_SLUG:-vllm-project/vllm}}"
     local trusted_repo=""
 
     [[ "${BUILDKITE:-false}" == "true" ]] || return 1
     [[ "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]] || return 1
-    [[ "${BUILDKITE_BRANCH:-}" == "${ROCM_BASE_STABLE_BRANCH:-main}" ]] || return 1
+    [[ "${BUILDKITE_BRANCH:-}" == "${stable_branch}" ]] || return 1
     actual_repo=$(normalize_repo_slug "${BUILDKITE_REPO:-}")
-    trusted_repo=$(normalize_repo_slug \
-        "${ROCM_BASE_STABLE_REPO_SLUG:-vllm-project/vllm}")
+    trusted_repo=$(normalize_repo_slug "${stable_repo}")
     [[ -n "${actual_repo}" && "${actual_repo}" == "${trusted_repo}" ]]
 }
 
@@ -355,364 +356,6 @@ hash_rocm_base_arg_values() {
     done
 }
 
-rocm_version_from_base_image() {
-    local base_image="$1"
-    local version=""
-
-    version="$(sed -n -E 's/.*:([0-9]+\.[0-9]+(\.[0-9]+)?)-.*/\1/p' <<<"${base_image}")"
-    tag_component "${version:-${base_image}}" 16
-}
-
-git_diff_changed_base() {
-    local range="$1"
-    local changed_files=""
-    local status=0
-
-    changed_files=$(git diff --name-only "${range}" -- "${DOCKERFILE}" 2>/dev/null) \
-        || status=$?
-    if ((status != 0)); then
-        echo "Unable to compare ROCm base inputs over ${range}" >&2
-        return 2
-    fi
-    [[ -n "${changed_files}" ]]
-}
-
-short_git_ref() {
-    local ref="$1"
-
-    git rev-parse --short "${ref}" 2>/dev/null || printf '%s\n' "${ref}"
-}
-
-extract_arg_default_from_ref() {
-    local ref="$1"
-    local arg_name="$2"
-    local content=""
-
-    content="$(git show "${ref}:${DOCKERFILE}" 2>/dev/null || true)"
-    sed -n -E "s/^[[:space:]]*ARG[[:space:]]+${arg_name}=\"?([^\"[:space:]]+)\"?.*/\\1/p" \
-        <<<"${content}" | head -1
-}
-
-log_arg_default_changes() {
-    local old_ref="$1"
-    local new_ref="$2"
-    local content_args="${ROCM_BASE_CONTENT_ARGS:-${DEFAULT_ROCM_BASE_CONTENT_ARGS}}"
-    local arg_name=""
-    local old_value=""
-    local new_value=""
-    local changed=0
-
-    echo "Changed ROCm base ARG defaults:"
-    for arg_name in ${content_args}; do
-        old_value="$(extract_arg_default_from_ref "${old_ref}" "${arg_name}")"
-        new_value="$(extract_arg_default_from_ref "${new_ref}" "${arg_name}")"
-        if [[ "${old_value}" != "${new_value}" ]]; then
-            echo "  - ${arg_name}: ${old_value:-<unset>} -> ${new_value:-<unset>}"
-            changed=1
-        fi
-    done
-
-    if [[ "${changed}" == "0" ]]; then
-        echo "  - none detected; Dockerfile instructions changed outside tracked ARG defaults"
-    fi
-}
-
-log_arg_line_diff() {
-    local range="$1"
-    local arg_diff=""
-
-    arg_diff="$(
-        git diff --unified=0 "${range}" -- "${DOCKERFILE}" 2>/dev/null \
-            | awk '/^[+-][[:space:]]*ARG[[:space:]]/ && $0 !~ /^(---|\+\+\+)/ { print "  " $0 }' \
-            || true
-    )"
-
-    if [[ -n "${arg_diff}" ]]; then
-        echo "Changed Dockerfile ARG lines:"
-        printf '%s\n' "${arg_diff}"
-    fi
-}
-
-log_rocm_base_change_check() {
-    local context="$1"
-    local range="$2"
-    local old_ref="$3"
-    local old_short=""
-    local head_short=""
-
-    old_short="$(short_git_ref "${old_ref}")"
-    head_short="$(short_git_ref HEAD)"
-
-    echo "--- :mag: ROCm base refresh check"
-    echo "Context: ${context}"
-    echo "Dockerfile: ${DOCKERFILE}"
-    echo "Base revision: ${old_short}"
-    echo "Head revision: ${head_short}"
-    echo "Git diff range: ${range}"
-}
-
-log_rocm_base_rebuild_reason() {
-    local context="$1"
-    local range="$2"
-    local old_ref="$3"
-    local changed_files=""
-
-    log_rocm_base_change_check "${context}" "${range}" "${old_ref}"
-
-    changed_files="$(git diff --name-only "${range}" -- "${DOCKERFILE}" 2>/dev/null || true)"
-    echo "Changed files:"
-    if [[ -n "${changed_files}" ]]; then
-        printf '  - %s\n' "${changed_files//$'\n'/$'\n  - '}"
-    else
-        echo "  - ${DOCKERFILE}"
-    fi
-    log_arg_default_changes "${old_ref}" HEAD
-    log_arg_line_diff "${range}"
-    echo "Decision: rebuilding ROCm base image because ${DOCKERFILE} changed."
-}
-
-rocm_base_changed_in_range() {
-    local context="$1"
-    local range="$2"
-    local old_ref="$3"
-    local diff_status=0
-
-    git_diff_changed_base "${range}" || diff_status=$?
-    case "${diff_status}" in
-        0)
-            log_rocm_base_rebuild_reason "${context}" "${range}" "${old_ref}"
-            return 0
-            ;;
-        1)
-            log_rocm_base_change_check "${context}" "${range}" "${old_ref}"
-            echo "Decision: ROCm base refresh not required; ${DOCKERFILE} is unchanged."
-            return 1
-            ;;
-        *)
-            echo "ROCm base refresh check failed; refusing to treat the base as unchanged" >&2
-            return 2
-            ;;
-    esac
-}
-
-find_base_merge_base() {
-    local base_branch="$1"
-    local base_ref="$2"
-    local initial_depth="${ROCM_BASE_DIFF_FETCH_DEPTH:-200}"
-    local deepen_by="${ROCM_BASE_DIFF_FETCH_DEEPEN:-1000}"
-    local merge_base=""
-
-    if [[ ! "${initial_depth}" =~ ^[1-9][0-9]*$ \
-        || ! "${deepen_by}" =~ ^[1-9][0-9]*$ ]]; then
-        echo "Invalid ROCm base diff fetch depth configuration" >&2
-        return 2
-    fi
-    if ! git fetch --no-tags --depth="${initial_depth}" origin \
-        "+refs/heads/${base_branch}:${base_ref}" >/dev/null 2>&1; then
-        echo "Unable to fetch base branch ${base_branch} for ROCm base comparison" >&2
-        return 2
-    fi
-
-    merge_base=$(git merge-base HEAD "${base_ref}" 2>/dev/null || true)
-    if [[ -n "${merge_base}" ]]; then
-        printf '%s\n' "${merge_base}"
-        return 0
-    fi
-
-    if git rev-parse --is-shallow-repository 2>/dev/null | grep -qx true; then
-        echo "Deepening checkout by ${deepen_by} commits for ROCm base comparison" >&2
-        if ! git fetch --no-tags --deepen="${deepen_by}" origin \
-            "+refs/heads/${base_branch}:${base_ref}" >/dev/null 2>&1; then
-            echo "Unable to deepen checkout for ROCm base comparison" >&2
-            return 2
-        fi
-        merge_base=$(git merge-base HEAD "${base_ref}" 2>/dev/null || true)
-    fi
-
-    if [[ -z "${merge_base}" ]]; then
-        echo "Unable to determine merge base with ${base_ref} after bounded fetch/deepen" >&2
-        return 2
-    fi
-    printf '%s\n' "${merge_base}"
-}
-
-trusted_stable_base_is_current() {
-    local use_sccache="${ROCM_BASE_USE_SCCACHE:-${USE_SCCACHE:-0}}"
-    local base_image_arg=""
-    local base_image_digest=""
-    local pinned_base_image=""
-    local expected_hash=""
-    local metadata_version="${ROCM_BASE_METADATA_VERSION:-${DEFAULT_ROCM_BASE_METADATA_VERSION}}"
-    local stable_ref="${BASE_REPO}:base"
-
-    if [[ ! -f "${DOCKERFILE}" ]]; then
-        echo "Cannot validate stable ROCm base without ${DOCKERFILE}" >&2
-        return 2
-    fi
-    base_image_arg=$(extract_arg_default BASE_IMAGE)
-    if [[ -z "${base_image_arg}" ]] \
-        || ! base_image_digest=$(resolve_image_digest "${base_image_arg}"); then
-        echo "Could not resolve the ROCm base parent while checking ${stable_ref}" >&2
-        return 2
-    fi
-    pinned_base_image=$(canonical_pinned_image_ref \
-        "${base_image_arg}" "${base_image_digest}") || return 2
-    if ! expected_hash=$(compute_base_content_hash \
-        "${use_sccache}" "${pinned_base_image}"); then
-        echo "Could not calculate the expected stable ROCm base identity" >&2
-        return 2
-    fi
-
-    if find_matching_base_content_ref \
-        "${expected_hash}" "${metadata_version}" "${stable_ref}" >/dev/null; then
-        echo "Trusted stable ROCm base already matches current inputs"
-        return 0
-    fi
-    echo "Trusted stable ROCm base is missing or stale; refreshing it"
-    return 1
-}
-
-rocm_base_changed() {
-    local base_branch="${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-main}"
-    local base_ref="refs/remotes/origin/${base_branch}"
-    local context=""
-    local range=""
-    local old_ref=""
-    local merge_base=""
-    local change_status=0
-    local stable_status=0
-
-    if [[ "${ROCM_BASE_REFRESH_SKIP:-0}" == "1" ]]; then
-        echo "ROCM_BASE_REFRESH_SKIP=1 set; skipping ROCm base refresh"
-        return 1
-    fi
-
-    if [[ "${ROCM_BASE_REFRESH_FORCE:-0}" == "1" ]]; then
-        echo "ROCM_BASE_REFRESH_FORCE=1 set; refreshing ROCm base image"
-        return 0
-    fi
-
-    if [[ "${ROCM_BASE_REFRESH_DIFF_UNAVAILABLE:-0}" == "1" ]]; then
-        echo "ROCM_BASE_REFRESH_DIFF_UNAVAILABLE=1 set; refreshing ROCm base image"
-        return 0
-    fi
-
-    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        echo "Not in a git checkout; cannot safely determine ROCm base changes" >&2
-        return 2
-    fi
-
-    if [[ "${BUILDKITE_BRANCH:-}" == "${ROCM_BASE_STABLE_BRANCH:-main}" \
-        && "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]]; then
-        if ! git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-            if ! git fetch --no-tags --deepen="${ROCM_BASE_DIFF_FETCH_DEPTH:-200}" \
-                origin >/dev/null 2>&1 \
-                || ! git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-                echo "Unable to establish previous stable-branch commit; refusing to skip ROCm base refresh" >&2
-                return 2
-            fi
-        fi
-        context="stable branch build; comparing against previous ${ROCM_BASE_STABLE_BRANCH:-main} commit"
-        range="HEAD~1..HEAD"
-        old_ref="HEAD~1"
-    else
-        if ! merge_base=$(find_base_merge_base "${base_branch}" "${base_ref}"); then
-            echo "Unable to establish base comparison; refusing to skip ROCm base refresh" >&2
-            return 2
-        fi
-        if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]]; then
-            context="pull request build against ${base_ref}"
-        else
-            context="branch build against ${base_ref}"
-        fi
-        range="${merge_base}...HEAD"
-        old_ref="${merge_base}"
-    fi
-
-    rocm_base_changed_in_range "${context}" "${range}" "${old_ref}" \
-        || change_status=$?
-    if ((change_status != 1)); then
-        return "${change_status}"
-    fi
-
-    # A failed build at commit N must be repaired by N+1 even when N+1 does
-    # not touch the Dockerfile. On trusted main, cheaply validate the published
-    # stable identity before accepting an unchanged git diff.
-    if is_trusted_main_build; then
-        trusted_stable_base_is_current || stable_status=$?
-        case "${stable_status}" in
-            0)
-                return 1
-                ;;
-            1)
-                return 0
-                ;;
-            *)
-                return "${stable_status}"
-                ;;
-        esac
-    fi
-    return 1
-}
-
-should_push_stable_tag() {
-    if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]]; then
-        return 1
-    fi
-
-    if [[ "${ROCM_BASE_PUSH_STABLE_TAG:-}" == "0" ]]; then
-        return 1
-    fi
-
-    is_trusted_main_build
-}
-
-trusted_main_tip_matches_build() {
-    local branch="${ROCM_BASE_STABLE_BRANCH:-main}"
-    local build_commit="${BUILDKITE_COMMIT:-}"
-    local remote_tip=""
-
-    is_trusted_main_build || return 1
-    if [[ ! "${build_commit}" =~ ^[0-9a-fA-F]{40}$ ]]; then
-        echo "Skipping ROCm stable tag: Buildkite commit is missing or invalid" >&2
-        return 1
-    fi
-    remote_tip=$(git ls-remote --exit-code "${BUILDKITE_REPO}" \
-        "refs/heads/${branch}" 2>/dev/null | awk 'NR == 1 { print $1 }')
-    if [[ ! "${remote_tip}" =~ ^[0-9a-fA-F]{40}$ ]]; then
-        echo "Skipping ROCm stable tag: could not resolve remote ${branch} tip" >&2
-        return 1
-    fi
-    if [[ "${remote_tip,,}" != "${build_commit,,}" ]]; then
-        if git fetch --no-tags --depth=1 "${BUILDKITE_REPO}" "${remote_tip}" \
-            >/dev/null 2>&1 \
-            && git diff --quiet "${build_commit}" "${remote_tip}" -- "${DOCKERFILE}"; then
-            echo "Current ${branch} tip has the same ROCm base inputs; publishing completed build"
-            return 0
-        fi
-        echo "Skipping ROCm stable tag: ${branch} changed after ${build_commit} (${remote_tip})" >&2
-        return 1
-    fi
-    return 0
-}
-
-tag_base_image_aliases() {
-    local source_ref="$1"
-    local descriptive_tag="$2"
-    local stable_tag="$3"
-    local -a tags=(-t "${descriptive_tag}")
-
-    ROCM_BASE_STABLE_TAG_UPDATED=0
-    if should_push_stable_tag && trusted_main_tip_matches_build; then
-        tags+=(-t "${stable_tag}")
-        # shellcheck disable=SC2034  # Read by sourced legacy callers/tests.
-        ROCM_BASE_STABLE_TAG_UPDATED=1
-    fi
-
-    docker buildx imagetools create --prefer-index=false \
-        "${tags[@]}" "${source_ref}"
-}
-
 setup_builder() {
     echo "--- :buildkite: Setting up buildx builder for ROCm base"
     if docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
@@ -770,14 +413,14 @@ build_base_image() {
     local cache_hit=0
     local build_required=0
     local content_files="${ROCM_BASE_CONTENT_FILES:-${DEFAULT_ROCM_BASE_CONTENT_FILES}}"
-    local content_args="${ROCM_BASE_CONTENT_ARGS:-${DEFAULT_ROCM_BASE_CONTENT_ARGS}}"
     local content_files_hash=""
     local metadata_version="${ROCM_BASE_METADATA_VERSION:-${DEFAULT_ROCM_BASE_METADATA_VERSION}}"
+    local build_arg_names_config="${ROCM_BASE_BUILD_ARGS:-${DEFAULT_ROCM_BASE_BUILD_ARGS}}"
     local arg_name=""
     local arg_value=""
     local -a build_args=()
+    local -a build_arg_names=()
     local -a content_paths=()
-    local -a content_arg_names=()
 
     if [[ ! -f "${DOCKERFILE}" ]]; then
         echo "Error: ROCm base Dockerfile not found: ${DOCKERFILE}" >&2
@@ -785,6 +428,10 @@ build_base_image() {
     fi
     if [[ ! "${metadata_version}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,15}$ ]]; then
         echo "Invalid ROCm base metadata version: ${metadata_version}" >&2
+        return 1
+    fi
+    if [[ "${use_sccache}" != "0" && "${use_sccache}" != "1" ]]; then
+        echo "ROCm base USE_SCCACHE must be 0 or 1: ${use_sccache}" >&2
         return 1
     fi
 
@@ -814,6 +461,8 @@ build_base_image() {
     dependency_summary="base=${pinned_base_image},rocm=${rocm_version},python=${python_version_arg},pytorch=${pytorch_arg},torchvision=${pytorch_vision_arg},torchaudio=${pytorch_audio_arg},triton=${triton_arg},flash-attn=${fa_arg},aiter=${aiter_arg},mori=${mori_arg},pytorch-rocm-arch=${pytorch_rocm_arch_arg}"
     trusted_content_tag=$(trusted_base_content_ref "${base_hash}" "${metadata_version}")
     scoped_content_tag=$(scoped_base_content_ref "${base_hash}" "${metadata_version}")
+    # Preview writes share an exact-content namespace so stacked PRs can reuse
+    # identical images. They may import the trusted ref, but never overwrite it.
     if is_trusted_main_build; then
         scoped_content_tag="${trusted_content_tag}"
         writable_content_tag="${trusted_content_tag}"
@@ -822,8 +471,8 @@ build_base_image() {
     fi
 
     configure_rocm_base_layer_cache
-    read -r -a content_arg_names <<< "${content_args}"
-    for arg_name in "${content_arg_names[@]}"; do
+    read -r -a build_arg_names <<< "${build_arg_names_config}"
+    for arg_name in "${build_arg_names[@]}"; do
         [[ -n "${arg_name}" ]] || continue
         if [[ "${arg_name}" == "BASE_IMAGE" ]]; then
             arg_value="${pinned_base_image}"
