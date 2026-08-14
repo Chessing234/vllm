@@ -302,13 +302,19 @@ def compute_layout_strides(
         assert block_size is None or block_size == spec.block_size, (
             "Padded KV pages do not support kernel block splitting."
         )
-        assert {inv_order[_DIM_L], inv_order[_DIM_B]} == {0, 1}, (
-            f"Padded KV pages need L and B outermost, got {layout.name}."
+        lb = (inv_order[_DIM_L], inv_order[_DIM_B])
+        assert all(physical_shape[i] == 1 for i in range(max(lb) + 1) if i not in lb), (
+            "Padded KV pages need L and B outermost (any dim hoisted between "
+            f"them must have extent 1), got {layout.name}."
         )
 
-    logical_tail = prod(physical_shape[2:])
+    # Splitting the meta tensor at the inner of L and B makes the padded
+    # storage tail span exactly one page; without padding any split point
+    # yields the same dense strides.
+    split = max(inv_order[_DIM_L], inv_order[_DIM_B]) + 1
+    logical_tail = prod(physical_shape[split:])
     storage_tail = padded if padded is not None else logical_tail
-    physical = torch.empty((*physical_shape[:2], storage_tail), device="meta")
+    physical = torch.empty((*physical_shape[:split], storage_tail), device="meta")
     strides = list(
         physical[..., :logical_tail].view(physical_shape).permute(*inv_order).stride()
     )
