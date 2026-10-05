@@ -510,3 +510,21 @@ def test_configure_subprocess_numa_fallback(monkeypatch):
     with numa_utils.configure_subprocess(node_config, local_rank=0):
         assert multiprocessing.spawn.get_executable() == before
         assert numa_utils._NUMACTL_ARGS_ENV not in os.environ
+
+
+@pytest.mark.parametrize("cpulist", [None, "", "invalid", "2-3"])
+def test_enginecore_pct_requires_priority_cpus_from_every_node(monkeypatch, cpulist):
+    _patch_pct_gates(
+        monkeypatch,
+        model_match=True,
+        highest_perf=46,
+        cpulist_by_node={0: "0-31", 1: cpulist},
+    )
+    config = _make_config(
+        numa_bind=True,
+        numa_bind_nodes=[0, 1],
+        tensor_parallel_size=2,
+    )
+    assert numa_utils._get_numactl_enginecore_args(config.parallel_config, 0) == (
+        "--cpunodebind=0,1 --membind=0,1"
+    )

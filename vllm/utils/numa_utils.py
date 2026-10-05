@@ -298,17 +298,17 @@ def _maybe_get_pct_cpu_binding(numa_nodes: list[int]) -> list[int] | None:
         try:
             cpulist_raw = cpulist_path.read_text().strip()
         except OSError:
-            continue
+            return None
         if not cpulist_raw:
-            continue
+            return None
         try:
             node_cpus = parse_id_list(cpulist_raw)
         except ValueError:
-            continue
+            return None
 
         priority = [cpu for cpu in node_cpus if cpu % stride in (0, 1)]
         if not priority:
-            continue
+            return None
         union_cpus.update(priority)
         logger.info(
             "Detected PCT-capable Granite Rapids Xeon (stride=%d); "
