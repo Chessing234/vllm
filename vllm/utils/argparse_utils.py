@@ -417,7 +417,11 @@ class FlexibleArgumentParser(ArgumentParser):
                     regular_args_seen.add(arg_name)
                 continue
 
-            if processed_arg.startswith("-") and "." in processed_arg:
+            if (
+                processed_arg.startswith("-")
+                and "." in processed_arg
+                and not self._negative_number_matcher.match(processed_arg)
+            ):
                 if "=" in processed_arg:
                     processed_arg, value_str = processed_arg.split("=", 1)
                     if "." not in processed_arg:

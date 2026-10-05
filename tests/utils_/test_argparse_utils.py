@@ -541,3 +541,19 @@ def test_group_description_is_summary_only():
     parser._search_keyword = "myconfig"
     assert "Summary line." in parser.format_help()
     assert "only belong in the docs" not in parser.format_help()
+
+
+@pytest.mark.parametrize("value", ["-0.5", "-.5", "-1.25"])
+def test_negative_decimal_values_are_not_dotted_options(value):
+    parser = FlexibleArgumentParser()
+    parser.add_argument("--presence-penalty", type=float)
+    parser.add_argument("--model")
+    args = parser.parse_args(["--presence-penalty", value, "--model", "test-model"])
+    assert args.presence_penalty == float(value)
+    assert args.model == "test-model"
+
+
+def test_short_dotted_option_still_parses():
+    parser = FlexibleArgumentParser()
+    parser.add_argument("-cc", type=json.loads)
+    assert parser.parse_args(["-cc.mode", "1"]).cc == {"mode": 1}
