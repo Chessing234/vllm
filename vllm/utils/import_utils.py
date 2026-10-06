@@ -112,8 +112,16 @@ def import_from_path(module_name: str, file_path: str | os.PathLike) -> ModuleTy
     assert spec.loader is not None
 
     module = importlib.util.module_from_spec(spec)
+    previous_module = sys.modules.get(module_name)
     sys.modules[module_name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        if previous_module is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous_module
+        raise
     return module
 
 

@@ -1,11 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import importlib
 import sys
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vllm.utils.import_utils import PlaceholderModule, _has_module, import_plugin
+from vllm.utils.import_utils import (
+    PlaceholderModule,
+    _has_module,
+    import_from_path,
+    import_plugin,
+)
 
 
 def _raises_module_not_found():
@@ -135,3 +142,31 @@ class TestImportPlugin:
         ):
             result = import_plugin("nonexistent_plugin_xyz")
             assert result is None
+
+    def test_failed_file_import_does_not_poison_later_imports(
+        self, tmp_path, monkeypatch
+    ):
+        plugin_file = tmp_path / "broken_test_plugin.py"
+        plugin_file.write_text("VALUE = 42\nraise RuntimeError('plugin failed')\n")
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        try:
+            assert import_plugin(str(plugin_file)) is None
+            assert "broken_test_plugin" not in sys.modules
+            with pytest.raises(RuntimeError, match="plugin failed"):
+                importlib.import_module("broken_test_plugin")
+        finally:
+            sys.modules.pop("broken_test_plugin", None)
+
+
+@pytest.mark.parametrize("error", [RuntimeError, KeyboardInterrupt])
+def test_failed_import_from_path_restores_existing_module(tmp_path, monkeypatch, error):
+    plugin_file = tmp_path / "existing_test_plugin.py"
+    plugin_file.write_text(f"raise {error.__name__}('plugin failed')\n")
+    existing = ModuleType("existing_test_plugin")
+    monkeypatch.setitem(sys.modules, "existing_test_plugin", existing)
+
+    with pytest.raises(error, match="plugin failed"):
+        import_from_path("existing_test_plugin", plugin_file)
+
+    assert sys.modules["existing_test_plugin"] is existing
