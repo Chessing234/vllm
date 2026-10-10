@@ -7,6 +7,17 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.exceptions import VLLMValidationError
 
 
+def test_structured_outputs_must_be_an_object():
+    with pytest.raises(VLLMValidationError, match="must be an object"):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "model": "facebook/opt-125m",
+                "structured_outputs": ["json"],
+            }
+        )
+
+
 def test_chat_completion_request_with_no_tools():
     # tools key is not present
     request = ChatCompletionRequest.model_validate(

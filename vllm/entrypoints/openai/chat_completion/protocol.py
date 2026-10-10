@@ -887,6 +887,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
         # structured_outputs may arrive as a dict (from JSON/raw kwargs) or
         # as a StructuredOutputsParams dataclass instance.
         is_dataclass = isinstance(structured_outputs_kwargs, StructuredOutputsParams)
+        if not is_dataclass and not isinstance(structured_outputs_kwargs, dict):
+            raise VLLMValidationError(
+                "`structured_outputs` must be an object.",
+                parameter="structured_outputs",
+            )
         count = sum(
             (
                 getattr(structured_outputs_kwargs, k, None)

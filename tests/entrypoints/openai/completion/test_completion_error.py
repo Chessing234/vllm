@@ -1013,3 +1013,12 @@ def test_non_numeric_logprobs_rejected(field_name):
             max_tokens=10,
             **{field_name: "2"},
         )
+
+
+def test_structured_outputs_must_be_an_object():
+    with pytest.raises(VLLMValidationError, match="must be an object"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            structured_outputs=["json"],
+        )
