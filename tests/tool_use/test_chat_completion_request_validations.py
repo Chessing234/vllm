@@ -7,6 +7,18 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.exceptions import VLLMValidationError
 
 
+def test_named_tool_choice_rejects_malformed_tools():
+    with pytest.raises(VLLMValidationError, match="function object"):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "model": "facebook/opt-125m",
+                "tools": [{"type": "function"}],
+                "tool_choice": {"type": "function", "function": {"name": "lookup"}},
+            }
+        )
+
+
 def test_chat_completion_request_with_no_tools():
     # tools key is not present
     request = ChatCompletionRequest.model_validate(

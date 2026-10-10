@@ -989,8 +989,25 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         f" in `tool_choice`! {correct_usage_message}",
                         parameter="tool_choice.function.name",
                     )
-                for tool in data["tools"]:
-                    if tool["function"]["name"] == function_name:
+                tools = data["tools"]
+                if not isinstance(tools, list):
+                    raise VLLMValidationError(
+                        "`tools` must be an array.",
+                        parameter="tools",
+                    )
+                for tool in tools:
+                    if not isinstance(tool, dict):
+                        raise VLLMValidationError(
+                            "`tools` entries must be objects.",
+                            parameter="tools",
+                        )
+                    tool_function = tool.get("function")
+                    if not isinstance(tool_function, dict):
+                        raise VLLMValidationError(
+                            "`tools` entries must include a function object.",
+                            parameter="tools",
+                        )
+                    if tool_function.get("name") == function_name:
                         valid_tool = True
                         break
                 if not valid_tool:
