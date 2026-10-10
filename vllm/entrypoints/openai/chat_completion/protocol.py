@@ -555,7 +555,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 continue
             tool_calls = msg.get("tool_calls")
             if tool_calls is not None and not isinstance(tool_calls, list):
-                msg["tool_calls"] = list(tool_calls)
+                try:
+                    msg["tool_calls"] = list(tool_calls)
+                except TypeError:
+                    raise VLLMValidationError(
+                        "`tool_calls` must be an array.",
+                        parameter="messages",
+                        value=tool_calls,
+                    ) from None
             reasoning_content = msg.pop("reasoning_content", None)
             if reasoning_content is not None and msg.get("reasoning") is None:
                 msg["reasoning"] = reasoning_content

@@ -7,6 +7,22 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.exceptions import VLLMValidationError
 
 
+def test_non_iterable_tool_calls_is_a_client_error():
+    with pytest.raises(VLLMValidationError, match="must be an array"):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "ok",
+                        "tool_calls": 1,
+                    }
+                ],
+                "model": "facebook/opt-125m",
+            }
+        )
+
+
 def test_chat_completion_request_with_no_tools():
     # tools key is not present
     request = ChatCompletionRequest.model_validate(
