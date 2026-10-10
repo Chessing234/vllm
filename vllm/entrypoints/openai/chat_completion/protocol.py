@@ -1046,6 +1046,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if not isinstance(data, dict):
             return data
         messages = data.get("messages", [])
+        # Explicit null is not the default empty list. Iterating it raised
+        # TypeError and the request became an HTTP 500.
+        if not isinstance(messages, list):
+            return data
         for msg in messages:
             # Check if this is a system message
             if isinstance(msg, dict) and msg.get("role") == "system":

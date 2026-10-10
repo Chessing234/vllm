@@ -2,9 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.exceptions import VLLMValidationError
+
+
+def test_null_messages_is_a_client_error():
+    with pytest.raises((VLLMValidationError, ValidationError)):
+        ChatCompletionRequest.model_validate(
+            {"messages": None, "model": "facebook/opt-125m"}
+        )
 
 
 def test_chat_completion_request_with_no_tools():
