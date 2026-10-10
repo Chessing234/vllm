@@ -42,6 +42,18 @@ def test_diffusion_rejects_unsupported_params(kwargs: dict):
         params.verify(MockModelConfig(is_diffusion=True), None, None, None)
 
 
+def test_logit_bias_rejects_non_finite_and_non_numeric_values():
+    with pytest.raises(VLLMValidationError, match="finite numbers"):
+        SamplingParams.from_optional(logit_bias={1: float("nan")})
+    with pytest.raises(VLLMValidationError, match="finite numbers"):
+        SamplingParams.from_optional(logit_bias={"1": "nope"})
+
+
+def test_logit_bias_clamps_numeric_values():
+    params = SamplingParams.from_optional(logit_bias={"2": 150})
+    assert params.logit_bias == {2: 100.0}
+
+
 def test_diffusion_accepts_default_params():
     SamplingParams().verify(MockModelConfig(is_diffusion=True), None, None, None)
 

@@ -486,11 +486,29 @@ class SamplingParams(
         trace_decode_token_ids: list[int] | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
+
+            def _clamp_logit_bias(bias: Any) -> float:
+                try:
+                    bias_f = float(bias)
+                except (TypeError, ValueError):
+                    raise VLLMValidationError(
+                        "logit_bias values must be finite numbers.",
+                        parameter="logit_bias",
+                        value=bias,
+                    ) from None
+                if not math.isfinite(bias_f):
+                    raise VLLMValidationError(
+                        "logit_bias values must be finite numbers.",
+                        parameter="logit_bias",
+                        value=bias,
+                    )
+                return min(100.0, max(-100.0, bias_f))
+
             # Fast path uses a dict comprehension; on failure we iterate once
             # to identify the exact offending entry for the error message.
             try:
                 logit_bias = {
-                    int(token): min(100.0, max(-100.0, bias))
+                    int(token): _clamp_logit_bias(bias)
                     for token, bias in logit_bias.items()
                 }
             except (ValueError, TypeError):
@@ -502,7 +520,7 @@ class SamplingParams(
                     except (ValueError, TypeError):
                         invalid_keys.append(token)
                         continue
-                    converted_logit_bias[token_id] = min(100.0, max(-100.0, bias))
+                    converted_logit_bias[token_id] = _clamp_logit_bias(bias)
                 if invalid_keys:
                     raise VLLMValidationError(
                         f"logit_bias contains key(s) that cannot be "
